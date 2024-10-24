@@ -8,37 +8,35 @@ const initialUserBalance = 10000;
 async function createTokenBeaconProxy() {
   const [admin, unknown] = await ethers.getSigners();
 
-  const BridgedToken = await ethers.getContractFactory("BridgedToken");
+  const bridgedTokenFactory = await ethers.getContractFactory("BridgedToken");
 
-  // Deploy token beacon
-  const l1TokenBeacon = await upgrades.deployBeacon(BridgedToken);
-  await l1TokenBeacon.waitForDeployment();
+  // Deploy token beacon (only one beacon if both serve the same purpose)
+  const l1TokenBeacon = await upgrades.deployBeacon(bridgedTokenFactory);
+  await l1TokenBeacon.deployed();
 
-  const l2TokenBeacon = await upgrades.deployBeacon(BridgedToken);
-  await l2TokenBeacon.waitForDeployment();
+  const l2TokenBeacon = await upgrades.deployBeacon(bridgedTokenFactory);
+  await l2TokenBeacon.deployed();
 
   // Create tokens
-  const abcToken = (await upgrades.deployBeaconProxy(await l1TokenBeacon.getAddress(), BridgedToken, [
+  const abcToken = (await upgrades.deployBeaconProxy(l1TokenBeacon.address, bridgedTokenFactory, [
     "AbcToken",
     "ABC",
     18,
-  ])) as unknown as BridgedToken;
+  ])) as BridgedToken;
 
-  const sixDecimalsToken = (await upgrades.deployBeaconProxy(await l1TokenBeacon.getAddress(), BridgedToken, [
+  const sixDecimalsToken = (await upgrades.deployBeaconProxy(l1TokenBeacon.address, bridgedTokenFactory, [
     "sixDecimalsToken",
     "SIX",
     6,
-  ])) as unknown as BridgedToken;
+  ])) as BridgedToken;
 
   // Create a new token implementation
-  const UpgradedBridgedToken = await ethers.getContractFactory("UpgradedBridgedToken");
-  const newImplementation = await UpgradedBridgedToken.deploy();
-  await newImplementation.waitForDeployment();
+  const upgradedBridgedTokenFactory = await ethers.getContractFactory("UpgradedBridgedToken");
+  const newImplementation = await upgradedBridgedTokenFactory.deploy();
+  await newImplementation.deployed();
 
   // Update l2TokenBeacon with new implementation
-  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-  // @ts-ignore
-  await l2TokenBeacon.connect(admin).upgradeTo(newImplementation.getAddress());
+  await l2TokenBeacon.connect(admin).upgradeTo(newImplementation.address);
 
   // Set initial balance
   await sixDecimalsToken.connect(admin).mint(unknown.address, initialUserBalance);
@@ -49,7 +47,7 @@ async function createTokenBeaconProxy() {
     l1TokenBeacon,
     l2TokenBeacon,
     newImplementation,
-    UpgradedBridgedToken,
+    upgradedBridgedTokenFactory,
     abcToken,
     sixDecimalsToken,
   };
@@ -58,8 +56,8 @@ async function createTokenBeaconProxy() {
 describe("BridgedToken", function () {
   it("Should deploy BridgedToken", async function () {
     const { abcToken, sixDecimalsToken } = await loadFixture(createTokenBeaconProxy);
-    expect(await abcToken.getAddress()).to.be.not.null;
-    expect(await sixDecimalsToken.getAddress()).to.be.not.null;
+    expect(await abcToken.address).to.be.not.null;
+    expect(await sixDecimalsToken.address).to.be.not.null;
   });
 
   it("Should set the right metadata", async function () {
@@ -92,48 +90,42 @@ describe("BridgedToken", function () {
     const amount = 100;
     await expect(abcToken.connect(unknown).mint(unknown.address, amount)).to.be.revertedWithCustomError(
       abcToken,
-      "OnlyBridge",
+      "OnlyBridge"
     );
     await expect(abcToken.connect(unknown).burn(unknown.address, amount)).to.be.revertedWithCustomError(
       abcToken,
-      "OnlyBridge",
+      "OnlyBridge"
     );
   });
 });
 
 describe("BeaconProxy", function () {
   it("Should enable upgrade of existing beacon proxy", async function () {
-    const { admin, l1TokenBeacon, abcToken, newImplementation, UpgradedBridgedToken } =
+    const { admin, l1TokenBeacon, abcToken, newImplementation, upgradedBridgedTokenFactory } =
       await loadFixture(createTokenBeaconProxy);
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore
-    await l1TokenBeacon.connect(admin).upgradeTo(await newImplementation.getAddress());
-    expect(await l1TokenBeacon.implementation()).to.be.equal(await newImplementation.getAddress());
-    expect(
-      await (UpgradedBridgedToken.attach(await abcToken.getAddress()) as UpgradedBridgedToken).isUpgraded(),
-    ).to.be.equal(true);
+
+    await l1TokenBeacon.connect(admin).upgradeTo(newImplementation.address);
+    expect(await l1TokenBeacon.implementation()).to.be.equal(newImplementation.address);
+
+    const upgradedToken = upgradedBridgedTokenFactory.attach(abcToken.address) as UpgradedBridgedToken;
+    expect(await upgradedToken.isUpgraded()).to.be.equal(true);
   });
 
   it("Should deploy new beacon proxy with the updated implementation", async function () {
-    const { l2TokenBeacon, UpgradedBridgedToken } = await loadFixture(createTokenBeaconProxy);
+    const { l2TokenBeacon, upgradedBridgedTokenFactory } = await loadFixture(createTokenBeaconProxy);
     const newTokenBeaconProxy = await upgrades.deployBeaconProxy(
-      await l2TokenBeacon.getAddress(),
-      UpgradedBridgedToken,
-      [
-        "NAME",
-        "SYMBOL",
-        18, // Decimals
-      ],
+      l2TokenBeacon.address,
+      upgradedBridgedTokenFactory,
+      ["NAME", "SYMBOL", 18] // Decimals
     );
-    expect(await newTokenBeaconProxy.isUpgraded()).to.be.equal(true);
+    const upgradedToken = upgradedBridgedTokenFactory.attach(newTokenBeaconProxy.address) as UpgradedBridgedToken;
+    expect(await upgradedToken.isUpgraded()).to.be.equal(true);
   });
 
   it("Beacon upgrade should only be done by the owner", async function () {
     const { unknown, l1TokenBeacon, newImplementation } = await loadFixture(createTokenBeaconProxy);
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore
-    await expect(l1TokenBeacon.connect(unknown).upgradeTo(await newImplementation.getAddress())).to.be.revertedWith(
-      "Ownable: caller is not the owner",
+    await expect(l1TokenBeacon.connect(unknown).upgradeTo(newImplementation.address)).to.be.revertedWith(
+      "Ownable: caller is not the owner"
     );
   });
 });
